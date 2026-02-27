@@ -1,0 +1,19 @@
+# Dependencies
+**/node_modules
+
+# Env files
+**/.env
+
+# Firebase Admin service account key (private!)
+**/*firebase-adminsdk*.json
+**/*serviceAccount*.json
+
+# Logs
+**/*.log
+
+# Ignore Node modules and environment files in all subdirectories
+**/node_modules
+**/.env
+
+# React build output
+frontend/build
