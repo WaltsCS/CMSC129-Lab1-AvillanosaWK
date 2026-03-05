@@ -1,5 +1,5 @@
-//frontend/src/pages/ItemsPage.jsx
-import React, { useEffect, useMemo, useState } from "react";
+// frontend/src/pages/ItemsPage.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   createItem,
   getItems,
@@ -10,7 +10,6 @@ import {
 } from "../api/api";
 
 function fmtTs(ts) {
-  //Firestore timestamps come as { _seconds, _nanoseconds } in our JSON
   if (!ts || !ts._seconds) return "";
   const d = new Date(ts._seconds * 1000);
   return d.toLocaleString();
@@ -20,51 +19,58 @@ export default function ItemsPage() {
   const [items, setItems] = useState([]);
   const [includeDeleted, setIncludeDeleted] = useState(false);
 
+  // add form
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
 
+  // status + errors
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
+  // toast
+  const [toast, setToast] = useState(null); // { type: "success" | "error", message: string }
+  const toastTimerRef = useRef(null);
+
+  // editing
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
+  const editNameRef = useRef(null);
 
-  //Toast
-  const [toast, setToast] = useState({ type: "", text: "" });
+  // per-action loading labels
+  const [busy, setBusy] = useState({
+    add: false,
+    refresh: false,
+    saveEdit: false,
+    softDelete: null, // itemId
+    restore: null, // itemId
+    hardDelete: null, // itemId
+  });
 
-  //Per-item action loading
-  const [busyId, setBusyId] = useState(null);
+  // hard delete modal
+  const [confirm, setConfirm] = useState({
+    open: false,
+    item: null, // { id, name }
+  });
 
-  //Hard delete modal
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [confirmItem, setConfirmItem] = useState(null);
-
-  function showToast(type, text) {
-    setToast({ type, text });
-    window.clearTimeout(showToast._t);
-    showToast._t = window.setTimeout(() => setToast({ type: "", text: "" }), 2000);
-  }
-
-  function openHardDeleteModal(item) {
-    setConfirmItem(item);
-    setConfirmOpen(true);
-  }
-
-  function closeHardDeleteModal() {
-    setConfirmOpen(false);
-    setConfirmItem(null);
+  function showToast(type, message, ms = 2200) {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast({ type, message });
+    toastTimerRef.current = setTimeout(() => setToast(null), ms);
   }
 
   async function refresh() {
     setErr("");
     setLoading(true);
+    setBusy((b) => ({ ...b, refresh: true }));
     try {
       const res = await getItems(includeDeleted);
       const list = res.data.items || [];
 
-      //Sort client-side (since GET active-only may not be ordered)
-      list.sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
+      // Sort newest first
+      list.sort(
+        (a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0)
+      );
 
       setItems(list);
     } catch (e) {
@@ -73,12 +79,13 @@ export default function ItemsPage() {
       showToast("error", msg);
     } finally {
       setLoading(false);
+      setBusy((b) => ({ ...b, refresh: false }));
     }
   }
 
   useEffect(() => {
     refresh();
-    //eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [includeDeleted]);
 
   const activeCount = useMemo(
@@ -91,28 +98,30 @@ export default function ItemsPage() {
     setErr("");
 
     if (!name.trim()) {
-      setErr("Name is required.");
-      showToast("error", "Name is required.");
+      const msg = "Name is required.";
+      setErr(msg);                 // inline error (stays)
+      showToast("error", msg);     // red toast (auto hides)
       return;
     }
 
-    setBusyId("add");
+    setBusy((b) => ({ ...b, add: true }));
     try {
-      await createItem({ name, description });
+      await createItem({ name: name.trim(), description });
       setName("");
       setDescription("");
-      await refresh();
       showToast("success", "Item added.");
+      await refresh();
     } catch (e2) {
       const msg = e2?.response?.data?.error || "Failed to create item.";
       setErr(msg);
       showToast("error", msg);
     } finally {
-      setBusyId(null);
+      setBusy((b) => ({ ...b, add: false }));
     }
   }
 
   function startEdit(item) {
+    setErr("");
     setEditingId(item.id);
     setEditName(item.name || "");
     setEditDesc(item.description || "");
@@ -124,71 +133,107 @@ export default function ItemsPage() {
     setEditDesc("");
   }
 
+  // autofocus edit name when edit mode starts
+  useEffect(() => {
+    if (editingId) {
+      // next tick to ensure input is mounted
+      setTimeout(() => editNameRef.current?.focus(), 0);
+    }
+  }, [editingId]);
+
   async function saveEdit(id) {
     setErr("");
-    setBusyId(id);
+
+    if (!editName.trim()) {
+      const msg = "Name is required.";
+      setErr(msg);
+      showToast("error", msg);
+      return;
+    }
+
+    setBusy((b) => ({ ...b, saveEdit: true }));
     try {
-      await updateItem(id, { name: editName, description: editDesc });
+      await updateItem(id, { name: editName.trim(), description: editDesc });
       cancelEdit();
-      await refresh();
       showToast("success", "Item updated.");
+      await refresh();
     } catch (e) {
       const msg = e?.response?.data?.error || "Failed to update item.";
       setErr(msg);
       showToast("error", msg);
     } finally {
-      setBusyId(null);
+      setBusy((b) => ({ ...b, saveEdit: false }));
     }
   }
 
   async function doSoftDelete(id) {
     setErr("");
-    setBusyId(id);
+    setBusy((b) => ({ ...b, softDelete: id }));
     try {
       await softDeleteItem(id);
-      await refresh();
       showToast("success", "Item soft deleted.");
+      await refresh();
     } catch (e) {
       const msg = e?.response?.data?.error || "Failed to soft delete.";
       setErr(msg);
       showToast("error", msg);
     } finally {
-      setBusyId(null);
+      setBusy((b) => ({ ...b, softDelete: null }));
     }
   }
 
   async function doRestore(id) {
     setErr("");
-    setBusyId(id);
+    setBusy((b) => ({ ...b, restore: id }));
     try {
       await restoreItem(id);
-      await refresh();
       showToast("success", "Item restored.");
+      await refresh();
     } catch (e) {
       const msg = e?.response?.data?.error || "Failed to restore.";
       setErr(msg);
       showToast("error", msg);
     } finally {
-      setBusyId(null);
+      setBusy((b) => ({ ...b, restore: null }));
     }
   }
 
-  async function confirmHardDelete() {
-    if (!confirmItem?.id) return;
+  function openHardDeleteModal(item) {
+    setConfirm({ open: true, item: { id: item.id, name: item.name || "this item" } });
+  }
 
+  function closeHardDeleteModal() {
+    setConfirm({ open: false, item: null });
+  }
+
+  async function confirmHardDelete() {
+    if (!confirm.item?.id) return;
+
+    const id = confirm.item.id;
     setErr("");
-    setBusyId(confirmItem.id);
+    setBusy((b) => ({ ...b, hardDelete: id }));
+
     try {
-      await hardDeleteItem(confirmItem.id);
+      await hardDeleteItem(id);
       closeHardDeleteModal();
-      await refresh();
       showToast("success", "Item permanently deleted.");
+      await refresh();
     } catch (e) {
       const msg = e?.response?.data?.error || "Failed to hard delete.";
       setErr(msg);
       showToast("error", msg);
     } finally {
-      setBusyId(null);
+      setBusy((b) => ({ ...b, hardDelete: null }));
+    }
+  }
+
+  function onEditKeyDown(e, id) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      saveEdit(id);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancelEdit();
     }
   }
 
@@ -208,19 +253,23 @@ export default function ItemsPage() {
               type="checkbox"
               checked={includeDeleted}
               onChange={(e) => setIncludeDeleted(e.target.checked)}
+              disabled={busy.refresh}
             />
             <span style={{ marginLeft: 8 }}>Show deleted</span>
           </label>
         </header>
 
-        {toast.text && (
+        {/* toast */}
+        {toast && (
           <div
             style={{
               ...styles.toast,
               ...(toast.type === "success" ? styles.toastSuccess : styles.toastError),
             }}
+            role="status"
+            aria-live="polite"
           >
-            {toast.text}
+            {toast.message}
           </div>
         )}
 
@@ -233,17 +282,17 @@ export default function ItemsPage() {
               placeholder="Item name (required)"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              disabled={busyId === "add"}
+              disabled={busy.add}
             />
             <input
               style={styles.input}
               placeholder="Description (optional)"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              disabled={busyId === "add"}
+              disabled={busy.add}
             />
-            <button style={styles.primaryBtn} type="submit" disabled={busyId === "add"}>
-              {busyId === "add" ? "Adding..." : "Add"}
+            <button style={styles.primaryBtn} type="submit" disabled={busy.add}>
+              {busy.add ? "Adding..." : "Add"}
             </button>
           </form>
 
@@ -253,8 +302,12 @@ export default function ItemsPage() {
         <section style={styles.card}>
           <div style={styles.cardHeaderRow}>
             <h2 style={styles.cardTitle}>Items</h2>
-            <button style={styles.secondaryBtn} onClick={refresh} disabled={loading}>
-              {loading ? "Refreshing..." : "Refresh"}
+            <button
+              style={styles.secondaryBtn}
+              onClick={refresh}
+              disabled={busy.refresh}
+            >
+              {busy.refresh ? "Refreshing..." : "Refresh"}
             </button>
           </div>
 
@@ -267,7 +320,10 @@ export default function ItemsPage() {
               {items.map((it) => {
                 const isDeleted = it.deletedAt != null;
                 const isEditing = editingId === it.id;
-                const isBusy = busyId === it.id;
+
+                const softBusy = busy.softDelete === it.id;
+                const restoreBusy = busy.restore === it.id;
+                const hardBusy = busy.hardDelete === it.id;
 
                 return (
                   <div
@@ -282,16 +338,19 @@ export default function ItemsPage() {
                       {isEditing ? (
                         <>
                           <input
+                            ref={editNameRef}
                             style={styles.inputSmall}
                             value={editName}
                             onChange={(e) => setEditName(e.target.value)}
-                            disabled={isBusy}
+                            onKeyDown={(e) => onEditKeyDown(e, it.id)}
+                            disabled={busy.saveEdit}
                           />
                           <input
                             style={styles.inputSmall}
                             value={editDesc}
                             onChange={(e) => setEditDesc(e.target.value)}
-                            disabled={isBusy}
+                            onKeyDown={(e) => onEditKeyDown(e, it.id)}
+                            disabled={busy.saveEdit}
                           />
                         </>
                       ) : (
@@ -315,14 +374,14 @@ export default function ItemsPage() {
                           <button
                             style={styles.primaryBtnSmall}
                             onClick={() => saveEdit(it.id)}
-                            disabled={isBusy}
+                            disabled={busy.saveEdit}
                           >
-                            {isBusy ? "Saving..." : "Save"}
+                            {busy.saveEdit ? "Saving..." : "Save"}
                           </button>
                           <button
                             style={styles.ghostBtnSmall}
                             onClick={cancelEdit}
-                            disabled={isBusy}
+                            disabled={busy.saveEdit}
                           >
                             Cancel
                           </button>
@@ -332,7 +391,7 @@ export default function ItemsPage() {
                           <button
                             style={styles.ghostBtnSmall}
                             onClick={() => startEdit(it)}
-                            disabled={isDeleted || isBusy}
+                            disabled={isDeleted || softBusy || restoreBusy || hardBusy}
                             title={isDeleted ? "Restore first to edit" : "Edit"}
                           >
                             Edit
@@ -342,26 +401,26 @@ export default function ItemsPage() {
                             <button
                               style={styles.secondaryBtnSmall}
                               onClick={() => doRestore(it.id)}
-                              disabled={isBusy}
+                              disabled={restoreBusy || hardBusy}
                             >
-                              {isBusy ? "Restoring..." : "Restore"}
+                              {restoreBusy ? "Restoring..." : "Restore"}
                             </button>
                           ) : (
                             <button
                               style={styles.secondaryBtnSmall}
                               onClick={() => doSoftDelete(it.id)}
-                              disabled={isBusy}
+                              disabled={softBusy || hardBusy}
                             >
-                              {isBusy ? "Deleting..." : "Soft delete"}
+                              {softBusy ? "Deleting..." : "Soft delete"}
                             </button>
                           )}
 
                           <button
                             style={styles.dangerBtnSmall}
                             onClick={() => openHardDeleteModal(it)}
-                            disabled={isBusy}
+                            disabled={hardBusy}
                           >
-                            {isBusy ? "Deleting..." : "Hard delete"}
+                            {hardBusy ? "Deleting..." : "Hard delete"}
                           </button>
                         </>
                       )}
@@ -378,32 +437,38 @@ export default function ItemsPage() {
             Backend: <code>http://localhost:5000</code>
           </span>
         </footer>
+      </div>
 
-        {confirmOpen && (
-          <div style={styles.modalOverlay} onClick={closeHardDeleteModal}>
-            <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-              <h3 style={{ marginTop: 0 }}>Confirm Hard Delete</h3>
-              <p style={{ color: "#aab3cf", marginTop: 6 }}>
-                Delete <b>{confirmItem?.name || "this item"}</b> permanently? This cannot
-                be undone.
-              </p>
+      {/* hard delete modal */}
+      {confirm.open && (
+        <div style={styles.modalOverlay} onMouseDown={closeHardDeleteModal}>
+          <div
+            style={styles.modal}
+            onMouseDown={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirm Hard Delete"
+          >
+            <div style={styles.modalTitle}>Confirm Hard Delete</div>
+            <div style={styles.modalBody}>
+              Delete <b>{confirm.item?.name}</b> permanently? This cannot be undone.
+            </div>
 
-              <div style={styles.modalActions}>
-                <button style={styles.ghostBtnSmall} onClick={closeHardDeleteModal}>
-                  Cancel
-                </button>
-                <button
-                  style={styles.dangerBtnSmall}
-                  onClick={confirmHardDelete}
-                  disabled={busyId === confirmItem?.id}
-                >
-                  {busyId === confirmItem?.id ? "Deleting..." : "Delete"}
-                </button>
-              </div>
+            <div style={styles.modalActions}>
+              <button style={styles.ghostBtnSmall} onClick={closeHardDeleteModal}>
+                Cancel
+              </button>
+              <button
+                style={styles.dangerBtnSmall}
+                onClick={confirmHardDelete}
+                disabled={busy.hardDelete === confirm.item?.id}
+              >
+                {busy.hardDelete === confirm.item?.id ? "Deleting..." : "Delete"}
+              </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -418,6 +483,7 @@ const styles = {
       '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   },
   container: { maxWidth: 980, margin: "0 auto" },
+
   header: {
     display: "flex",
     alignItems: "flex-end",
@@ -427,6 +493,7 @@ const styles = {
   },
   title: { margin: 0, fontSize: 32, letterSpacing: 0.2 },
   subtitle: { margin: "6px 0 0", color: "#aab3cf" },
+
   toggle: {
     display: "flex",
     alignItems: "center",
@@ -436,6 +503,24 @@ const styles = {
     border: "1px solid rgba(255,255,255,0.10)",
     borderRadius: 12,
   },
+
+  toast: {
+    padding: "10px 12px",
+    borderRadius: 12,
+    marginBottom: 12,
+    border: "1px solid transparent",
+  },
+  toastSuccess: {
+    background: "rgba(52, 211, 153, 0.12)",
+    borderColor: "rgba(52, 211, 153, 0.35)",
+    color: "#b6ffe8",
+  },
+  toastError: {
+    background: "rgba(255, 90, 90, 0.14)",
+    borderColor: "rgba(255,90,90,0.35)",
+    color: "#ffb3b3",
+  },
+
   card: {
     background: "rgba(255,255,255,0.06)",
     border: "1px solid rgba(255,255,255,0.10)",
@@ -445,6 +530,7 @@ const styles = {
     boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
   },
   cardTitle: { margin: 0, fontSize: 18 },
+
   cardHeaderRow: {
     display: "flex",
     alignItems: "center",
@@ -452,7 +538,9 @@ const styles = {
     gap: 12,
     marginBottom: 12,
   },
+
   form: { display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 },
+
   input: {
     flex: "1 1 240px",
     padding: "10px 12px",
@@ -472,6 +560,7 @@ const styles = {
     outline: "none",
     marginBottom: 8,
   },
+
   list: { display: "flex", flexDirection: "column", gap: 10, marginTop: 12 },
   row: {
     display: "flex",
@@ -481,6 +570,7 @@ const styles = {
     border: "1px solid #333",
     background: "rgba(0,0,0,0.25)",
   },
+
   itemTopRow: {
     display: "flex",
     alignItems: "baseline",
@@ -490,6 +580,7 @@ const styles = {
   itemName: { fontSize: 16, fontWeight: 700, minWidth: 0 },
   itemDesc: { marginTop: 6, color: "#d7def4", wordBreak: "break-word" },
   meta: { marginTop: 6, color: "#aab3cf", fontSize: 12, whiteSpace: "nowrap" },
+
   badge: {
     marginLeft: 10,
     fontSize: 11,
@@ -499,6 +590,7 @@ const styles = {
     border: "1px solid rgba(255, 90, 90, 0.35)",
     color: "#ffb3b3",
   },
+
   actions: {
     display: "flex",
     flexDirection: "column",
@@ -506,6 +598,7 @@ const styles = {
     alignItems: "stretch",
     minWidth: 120,
   },
+
   primaryBtn: {
     padding: "10px 14px",
     borderRadius: 12,
@@ -560,6 +653,7 @@ const styles = {
     cursor: "pointer",
     fontWeight: 700,
   },
+
   error: {
     marginTop: 12,
     padding: "10px 12px",
@@ -568,26 +662,10 @@ const styles = {
     border: "1px solid rgba(255,90,90,0.35)",
     color: "#ffb3b3",
   },
+
   muted: { color: "#aab3cf" },
   footer: { marginTop: 10, textAlign: "center" },
 
-  toast: {
-    marginBottom: 12,
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(0,0,0,0.25)",
-  },
-  toastSuccess: {
-    border: "1px solid rgba(120,255,170,0.25)",
-    background: "rgba(120,255,170,0.10)",
-    color: "#bfffd9",
-  },
-  toastError: {
-    border: "1px solid rgba(255,90,90,0.35)",
-    background: "rgba(255,90,90,0.12)",
-    color: "#ffb3b3",
-  },
   modalOverlay: {
     position: "fixed",
     inset: 0,
@@ -596,21 +674,21 @@ const styles = {
     alignItems: "center",
     justifyContent: "center",
     padding: 16,
-    zIndex: 1000,
+    zIndex: 999,
   },
   modal: {
-    width: "100%",
-    maxWidth: 420,
+    width: "min(520px, 100%)",
+    background: "rgba(20, 24, 36, 0.96)",
+    border: "1px solid rgba(255,255,255,0.12)",
     borderRadius: 16,
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "rgba(15,18,28,0.95)",
-    boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+    boxShadow: "0 30px 80px rgba(0,0,0,0.5)",
     padding: 16,
   },
+  modalTitle: { fontSize: 16, fontWeight: 800, marginBottom: 8 },
+  modalBody: { color: "#d7def4", lineHeight: 1.5, marginBottom: 14 },
   modalActions: {
     display: "flex",
-    gap: 10,
     justifyContent: "flex-end",
-    marginTop: 14,
+    gap: 10,
   },
 };
