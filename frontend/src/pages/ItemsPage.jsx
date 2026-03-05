@@ -242,7 +242,7 @@ export default function ItemsPage() {
       <div style={styles.container}>
         <header style={styles.header}>
           <div>
-            <h1 style={styles.title}>Items CRUD</h1>
+            <h1 style={styles.title}>Inventory App</h1>
             <p style={styles.subtitle}>
               Active: <b>{activeCount}</b> • Total shown: <b>{items.length}</b>
             </p>
